@@ -342,7 +342,8 @@ def tranform_pose(input_pose, from_frame, to_frame):
 
 
 if __name__ == '__main__':
-    rospy.init_node('object_tracking')
+    rospy.init_node('object_db')
+    #pass dynamic objects list, descriptor
     db = DynObjectDB([1,25,57], M2DP_desc)
     rospy.Subscriber('/depth_segmentation_node/object_segment', PointCloud2, db.segment_callback)
     
