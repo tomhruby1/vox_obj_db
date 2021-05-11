@@ -3,6 +3,7 @@
 import rospy
 import struct
 import time
+import sys
 
 import tf2_ros
 import tf
@@ -10,6 +11,8 @@ import tf_conversions
 import geometry_msgs.msg
 import tf2_geometry_msgs
 import obj_db_msgs.srv
+
+from tf.transformations import * 
 
 from geometry_msgs.msg import Pose
 from geometry_msgs.msg import PoseArray
@@ -26,7 +29,7 @@ from std_msgs.msg import Header
 import matplotlib.pyplot as plt
 
 from m2dp import M2DP
-# import open3d as o3d
+import open3d as o3d
 
 coco_labels = ['BG', 'person', 'bicycle', 'car', 'motorcycle', 'airplane',
                'bus', 'train', 'truck', 'boat', 'traffic light',
@@ -59,6 +62,18 @@ def M2DP_desc(seg):
     des, A1 = M2DP(seg)
     return des
 
+def M2DP_iss_desc(seg):
+    """
+        generate pointcloud signature from 
+        iss simplified pointcloud
+    """
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(seg)
+    keypoints = o3d.geometry.keypoint.compute_iss_keypoints(pcd)
+    
+    des, A1 = M2DP(seg)
+    return des
+
 def dist(x,y):
     '''
         ||euklidean distance ^2||
@@ -67,8 +82,11 @@ def dist(x,y):
     y = np.asarray(y)
     return np.linalg.norm((x-y)*(x-y)) 
 
+
+stats = {'desc_time_total':0, 'desc_time': [],'reg_time_total': 0, 'movements':[]}
+
 class DynObjectDB:
-    def __init__(self, dyn_label, descriptor):
+    def __init__(self, dyn_labels, descriptor):
         self.markerArray = MarkerArray()
         self.markerPublisher = rospy.Publisher('/dyn_objects', MarkerArray, queue_size=1)
         self.posePublisher = rospy.Publisher('/dyn_obj_poses', PoseArray, queue_size=1)
@@ -85,26 +103,26 @@ class DynObjectDB:
         self.stats = {'desc_time_total':0, 'desc_time': [],'reg_time_total': 0, 'movements':[]}
         self.calc_descriptor = descriptor
 
-        self.REG_T = 0.01   #threshold distance for pointcloud signatures nonsimilarity
-        self.FILTER_DYNAMIC = True #TODO: implement as rosparam
-        self.DYN_CLASSES = [1,57,25] #25 backpack, 57 chair, 1 person
+        self.REG_T = 0.05   #threshold distance for pointcloud signatures - max nonsimilarity toleration
+        self.FILTER_DYNAMIC = True  #TODO: implement as rosparam
+        self.DYN_CLASSES = dyn_labels
         self.WORLD_FRAME = "world"
         self.MOVE_T = 0.5
+        self.SPECIAL_TREAT_BG = True
 
-    def __del__(self):
-        # destructor
+    def print_stats(self):
         print("\n-----OBJECT DB-----")
         for cat in self.segments:
             if cat in self.DYN_CLASSES:
                 print(cat,"-",coco_labels[cat], "detected", len(self.segments[cat]), "DYNAMIC segments")
             else:
-                print(cat,"-",coco_labels[cat], "detected", len(self.segments[cat]), "segments")
-        print("total registering time:", self.stats['reg_time_total'])
-        print("total descriptors calculation time:", self.stats['desc_time_total'])
-        print("descriptots calc time avg:", np.average(self.stats['desc_time']), 
-              "max:", np.max(self.stats['desc_time']), "min:", np.min(self.stats['desc_time']))
-        print("movement avg:", np.average(self.stats['movements']), 
-              "max:", np.max(self.stats['movements']), "min:", np.min(self.stats['movements']))
+                print(cat,"-", coco_labels[cat], "detected", len(self.segments[cat]), "segments")
+        print("total registering time:", stats['reg_time_total'])
+        print("total descriptors calculation time:", stats['desc_time_total'])
+        print("descriptots calc time avg:", np.average(stats['desc_time']), 
+              "max:", np.max(stats['desc_time']), "min:", np.min(stats['desc_time']))
+        print("movement avg:", np.average(stats['movements']), 
+              "max:", np.max(stats['movements']), "min:", np.min(stats['movements']))
         # plt.plot(self.stats['movements'])
         # plt.show()
         print("----------------------")
@@ -137,19 +155,21 @@ class DynObjectDB:
         # - max time per descriptor
     #segment doesnt have one semantic label, but uses the most probable one? -- can change?
 
-    def has_moved(self, obj):
+    def has_moved(self, obj, pc):
         '''
             detects pointcloud movement
             input is pointcloud centroid -> if occluded could be different
                 --maybe if inside pointcloud not moving
             -> thresholding, t quite high
         '''
+        SIZE_GAIN_T = 0.001
         r2 = [obj['pos'].pose.position.x, obj['pos'].pose.position.y, obj['pos'].pose.position.z]
         r1 = [obj['pos_prev'].pose.position.x, obj['pos_prev'].pose.position.y, obj['pos_prev'].pose.position.z]
         move = np.linalg.norm(np.asarray(r1) - np.asarray(r2))
-        self.stats['movements'].append(move)
-        print("object",obj["semantic_label"],obj["id"],'movement detection', move)        
-        if(move < self.MOVE_T):
+        stats['movements'].append(move)
+        print("object",obj["semantic_label"],obj["id"],'movement detection', move)     
+        #consider pointcloud size for movement threshold
+        if(move < self.MOVE_T * SIZE_GAIN_T * len(pc)): 
             return False
 
         return True 
@@ -159,19 +179,49 @@ class DynObjectDB:
             registers segment into object ID using descriptor key
         '''
         cat = obj['semantic_label']
-        if cat not in self.segments:
+        if not cat in self.segments:
             self.segments[cat] = []
-        
+
         if len(self.segments[cat]) == 0:
             self.segments[cat].append(obj)
-        else: #lookup segment in segment library only under its label category
-            dists = []
-            for prot in self.segments[cat]:
-                dists.append(dist(prot["signature"], obj["signature"]))
-            argmin = np.argmin(dists)   #closest obj in its class
+        else: 
+            dists = []  #compared distances
+            argmin = 0  #closest segment
+            dist_min = None
+            #separate branch for BG segments
+            #if default class compare to all segments ...maybe do it for all?
+            if(False): #cat == 0 and self.SPEC
+                dist_min = 10000
+                min_cat = 0  
+                for c in self.segments: #loop through prototypes
+                    for prot_idx in range(len(self.segments[c])):
+                        prot = self.segments[c][prot_idx]
+                        d = dist(prot["signature"], obj["signature"])
+                        #stop if background segment too similar to dynamic one
+                        #fixes when cnn fails?
+                        if d < self.REG_T:
+                            if d < dist_min:
+                                dist_min = d
+                                min_cat = c
+                                argmin = prot_idx
+                            #if any bg segment too similar to dynamic one, get rid of 
+                            if ((min_cat != cat) and (min_cat in self.DYN_CLASSES)):
+                                print("background paired with dyn obj")
+                                return
+                cat = min_cat   #object paired with different cat
+                dists.append(dist_min)
 
-            if(dists[argmin] <= self.REG_T):
-                #label already seen
+            #if not BG segment
+            #lookup segment in segment library only under its label category
+            else:
+                for prot in self.segments[cat]:
+                    dists.append(dist(prot["signature"], obj["signature"]))
+                argmin = np.argmin(dists)   #closest obj in its class    
+                dist_min = dists[argmin]
+
+            #print("min distance: ", dist_min)
+            if(dist_min <= self.REG_T):    #paired with already seen 
+                #seg already seen
                 self.segments[cat][argmin]['observ_count'] += 1 #save poses for movement detect
                 self.segments[cat][argmin]['pos_prev'] = self.segments[cat][argmin]['pos']
                 self.segments[cat][argmin]['pos'] = obj['pos']
@@ -180,12 +230,16 @@ class DynObjectDB:
                 #label previously not seen, add new to segment db
                 obj['id'] = len(self.segments[cat]) #id inside its category list
                 self.segments[cat].append(obj)
-                print("new segment instance:", obj['id'], coco_labels[cat])
+                print("new segment instance:", coco_labels[cat], obj['id'])
+        
+                # print("SEGMENTAS")
+                # for c in self.segments:
+                #     print(c, "-", coco_labels[c], len(self.segments[c]))
 
     def segment_callback(self, data):
             assert isinstance(data, PointCloud2)    #?
             seg = point_cloud2.read_points(data)    #generator object
-            point = next(seg)
+            point = next(seg)   #get labels from the first point
             semantic_label = point[-1]
             instance_label = point[-2]
             
@@ -200,7 +254,6 @@ class DynObjectDB:
             seg_frame = data.header.frame_id.replace('/','')
             pose = build_pose_msg(seg_frame, mu)    #build pose from segment frame and clouds centroid
             pos = self.tranform_pose(pose, seg_frame, self.WORLD_FRAME, time_stamp = data.header.stamp)
-            print("BUILD POSE MSG: \n", pos)
             obj = {"id": 0, "signature": sign,"instance_label":instance_label, "semantic_label":semantic_label, 
                    "observ_count": 0, 'pos':pos, 'pos_prev': 0, 'frame': seg_frame}
             
@@ -209,23 +262,26 @@ class DynObjectDB:
             self.register_segment(obj)
             t2 = time.time()
             t_reg = t2 - t1
-            print("testing obj", obj['id'], "descriptor time:", t_desc, "registation time", t_reg)
-            self.stats['desc_time_total'] += t_desc
-            self.stats['desc_time'].append(t_desc)
-            self.stats['reg_time_total'] += t_reg
+            print("testing obj", obj['semantic_label'], obj['id'], 
+            "descriptor time:", t_desc, "registation time", t_reg)
+            stats['desc_time_total'] += t_desc
+            stats['desc_time'].append(t_desc)
+            stats['reg_time_total'] += t_reg
             
             #movement detection
             #not dynamic class but could be moving
             if(obj['semantic_label'] not in self.DYN_CLASSES):
                 #if was seen
                 if(self.segments[obj['semantic_label']][obj['id']]['observ_count'] > 0):
-                    if((not self.has_moved(self.segments[semantic_label][obj['id']])) 
+                    if((not self.has_moved(self.segments[semantic_label][obj['id']], pc)) 
                         or (not self.FILTER_DYNAMIC)):
                         #publish segment msg for mapping
+                        print("PUBLISHING object- class", obj['semantic_label'], "id", obj['id'])
                         self.segment_publisher.publish(data)
                     else:
                         print("MOVEMNT DETECTED", obj['id'], coco_labels[semantic_label])
-            else: #dynamic -> dont publish, create marker
+            #dynamic -> dont publish, create marker
+            else: 
                 #TODO: update markers only if position changed -> less dumb
                 marker = self.get_obj_marker(obj)
                 self.segments[obj['semantic_label']][obj['id']]['marker'] = marker
@@ -240,7 +296,7 @@ class DynObjectDB:
                 for obj in self.segments[dyn_class]:
                     ma.markers.append(obj["marker"])
             self.markerPublisher.publish(ma)
-        print("Markers published")
+        #print("Markers published")
     
     def publish_object_poses(self):
         # build pose array and publish
@@ -252,7 +308,7 @@ class DynObjectDB:
             self.posePublisher.publish(p)
         print("Poses published")
 
-    def tranform_pose(self, input_pose, to_frame, from_frame, time_stamp = rospy.Time()):
+    def tranform_pose(self, input_pose, from_frame, to_frame, time_stamp = rospy.Time()):
         #if !can_lookup_transform time_stamp = rospy.time() -- rospy.time() = most recent
         if not self.tf_buffer.can_transform(to_frame, from_frame, time_stamp):
             time_stamp = rospy.Time()
@@ -280,11 +336,11 @@ class DynObjectDB:
         return trans_pose 
 
 #TODO: zkontrolovat xyz zda neni prohazeno
-def build_pose_msg(frame, position, orientation = [0,0,0,1]):
+def build_pose_msg(frame, position, orientation = [0,0,0,1]):    
     p = Pose()
-    p.position.x = position[2]
+    p.position.x = position[0]
     p.position.y = position[1]
-    p.position.z = position[0]
+    p.position.z = position[2]
     # Make sure the quaternion is valid and normalized
     p.orientation.x = orientation[0]
     p.orientation.y = orientation[1]
@@ -300,54 +356,53 @@ def build_pose_msg(frame, position, orientation = [0,0,0,1]):
 
 
 
-def tranform_pose(input_pose, from_frame, to_frame):
-    #each listener has a buffer where it stores all the coordinate transforms coming from 
-    #the different tf broadcasters
+# def tranform_pose(input_pose, from_frame, to_frame):
+#     #each listener has a buffer where it stores all the coordinate transforms coming from 
+#     #the different tf broadcasters
     
-    tf_buffer = tf2_ros.Buffer() 
-    listener = tf2_ros.TransformListener(tf_buffer)
+#     tf_buffer = tf2_ros.Buffer() 
+#     listener = tf2_ros.TransformListener(tf_buffer)
     
-    # pose_stamped = tf2_geometry_msgs.PoseStamped()
-    # pose_stamped.pose = input_pose
-    # pose_stamped.header.frame_id = from_frame
-    # pose_stamped.header.stamp = rospy.Time.now()
+#     # pose_stamped = tf2_geometry_msgs.PoseStamped()
+#     # pose_stamped.pose = input_pose
+#     # pose_stamped.header.frame_id = from_frame
+#     # pose_stamped.header.stamp = rospy.Time.now()
 
-    # try: 
-    #     # ** It is important to wait for the listener to start listening. Hence the rospy.Duration(1)
-    #     output_pose_stamped = tf_buffer.transform(pose_stamped, to_frame, rospy.Duration(1))
-    #     return output_pose_stamped
+#     # try: 
+#     #     # ** It is important to wait for the listener to start listening. Hence the rospy.Duration(1)
+#     #     output_pose_stamped = tf_buffer.transform(pose_stamped, to_frame, rospy.Duration(1))
+#     #     return output_pose_stamped
     
-    # except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
-    #     raise
+#     # except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+#     #     raise
   
-    rospy.sleep(0.1)
-    #print("can tf?:", tf2_ros.can_transform(from_frame, to_frame, rospy.Time.now()))
-    try:
-        trans = tf_buffer.lookup_transform(from_frame, to_frame, rospy.Time())
-    except(tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
-        raise 
+#     rospy.sleep(0.1)
+#     #print("can tf?:", tf2_ros.can_transform(from_frame, to_frame, rospy.Time.now()))
+#     try:
+#         trans = tf_buffer.lookup_transform(from_frame, to_frame, rospy.Time())
+#     except(tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+#         raise 
     
-    trans_pose = tf2_geometry_msgs.do_transform_pose(poseStampedToTransform, transform)
-    print('transformed pose', trans_pose.pose)    
-    #tf1    
-    # listener = tf.TransformListener()
+#     trans_pose = tf2_geometry_msgs.do_transform_pose(poseStampedToTransform, transform)
+#     print('transformed pose', trans_pose.pose)    
+#     #tf1    
+#     # listener = tf.TransformListener()
 
-    # try:
-    #     # ** It is important to wait for the listener to start listening. Hence the rospy.Duration(1)
-    #     (pos,rot) = listener.lookupTransform(from_frame, to_frame, rospy.Time(0))
-    #     print("posrot", pos, rot)
-    #     return build_pose_msg(pos, rot)
-    # except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
-    #     raise
-
+#     # try:
+#     #     # ** It is important to wait for the listener to start listening. Hence the rospy.Duration(1)
+#     #     (pos,rot) = listener.lookupTransform(from_frame, to_frame, rospy.Time(0))
+#     #     print("posrot", pos, rot)
+#     #     return build_pose_msg(pos, rot)
+#     # except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
+#     #     raise
 
 if __name__ == '__main__':
-    rospy.init_node('object_db')
+    rospy.init_node('object_db', disable_signals=True)
     #pass dynamic objects list, descriptor
-    db = DynObjectDB([1,25,57], M2DP_desc)
+    db = DynObjectDB([1], M2DP_desc)
     rospy.Subscriber('/depth_segmentation_node/object_segment', PointCloud2, db.segment_callback)
-    
+
+    rospy.on_shutdown(db.print_stats)
     #TODO: service for voxblox to get dynamic labels ids
     #s = rospy.Service('get_dynamic_labels', )
-
     rospy.spin()
