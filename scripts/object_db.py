@@ -71,7 +71,20 @@ def M2DP_iss_desc(seg):
     pcd.points = o3d.utility.Vector3dVector(seg)
     keypoints = o3d.geometry.keypoint.compute_iss_keypoints(pcd)
     
-    des, A1 = M2DP(seg)
+    des, A1 = M2DP(keypoints.points)
+    return des
+
+def M2DP_downsample_desc(seg):
+    """
+        pointcloud signature downsampled to 
+        VOXEL_SIZEd voxels
+    """
+    VOXEL_SIZE = 0.05
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(seg)
+    downpcd = pcd.voxel_down_sample(voxel_size=VOXEL_SIZE)
+    
+    des, A1 = M2DP(downpcd.points)
     return des
 
 def dist(x,y):
@@ -108,10 +121,14 @@ class DynObjectDB:
         self.DYN_CLASSES = dyn_labels
         self.WORLD_FRAME = "world"
         self.MOVE_T = 0.5
-        self.SPECIAL_TREAT_BG = True
+        self.SIZE_K_MOVE_T = 0    #t = MOVE_T - SIZE_K_MOVE_T * size(pc) - increasing movement tolerance for larger pcds
+        self.SPECIAL_TREAT_BG = False
 
     def print_stats(self):
         print("\n-----OBJECT DB-----")
+        print("params used:")
+        print("REG_T:", self.REG_T)
+        print("MOVE_T", self.MOVE_T)
         for cat in self.segments:
             if cat in self.DYN_CLASSES:
                 print(cat,"-",coco_labels[cat], "detected", len(self.segments[cat]), "DYNAMIC segments")
@@ -119,8 +136,9 @@ class DynObjectDB:
                 print(cat,"-", coco_labels[cat], "detected", len(self.segments[cat]), "segments")
         print("total registering time:", stats['reg_time_total'])
         print("total descriptors calculation time:", stats['desc_time_total'])
-        print("descriptots calc time avg:", np.average(stats['desc_time']), 
+        print("desc. calculation time avg:", np.average(stats['desc_time']), 
               "max:", np.max(stats['desc_time']), "min:", np.min(stats['desc_time']))
+        print("total movements:", len(stats['movements']))
         print("movement avg:", np.average(stats['movements']), 
               "max:", np.max(stats['movements']), "min:", np.min(stats['movements']))
         # plt.plot(self.stats['movements'])
@@ -162,14 +180,13 @@ class DynObjectDB:
                 --maybe if inside pointcloud not moving
             -> thresholding, t quite high
         '''
-        SIZE_GAIN_T = 0.001
         r2 = [obj['pos'].pose.position.x, obj['pos'].pose.position.y, obj['pos'].pose.position.z]
         r1 = [obj['pos_prev'].pose.position.x, obj['pos_prev'].pose.position.y, obj['pos_prev'].pose.position.z]
         move = np.linalg.norm(np.asarray(r1) - np.asarray(r2))
         stats['movements'].append(move)
         print("object",obj["semantic_label"],obj["id"],'movement detection', move)     
         #consider pointcloud size for movement threshold
-        if(move < self.MOVE_T * SIZE_GAIN_T * len(pc)): 
+        if(move < self.MOVE_T - self.SIZE_K_MOVE_T * len(pc)): 
             return False
 
         return True 
@@ -190,7 +207,7 @@ class DynObjectDB:
             dist_min = None
             #separate branch for BG segments
             #if default class compare to all segments ...maybe do it for all?
-            if(False): #cat == 0 and self.SPEC
+            if(cat == 0 and self.SPECIAL_TREAT_BG): 
                 dist_min = 10000
                 min_cat = 0  
                 for c in self.segments: #loop through prototypes
@@ -397,11 +414,12 @@ def build_pose_msg(frame, position, orientation = [0,0,0,1]):
 #     #     raise
 
 if __name__ == '__main__':
-    rospy.init_node('object_db', disable_signals=True)
-    #pass dynamic objects list, descriptor
-    db = DynObjectDB([1], M2DP_desc)
+    rospy.init_node('object_db', disable_signals=True)  #disable signals?
+    
+    #pass dynamic objects list(COCO ids), descriptor function
+    db = DynObjectDB([1], M2DP_downsample_desc)
+    
     rospy.Subscriber('/depth_segmentation_node/object_segment', PointCloud2, db.segment_callback)
-
     rospy.on_shutdown(db.print_stats)
     #TODO: service for voxblox to get dynamic labels ids
     #s = rospy.Service('get_dynamic_labels', )
