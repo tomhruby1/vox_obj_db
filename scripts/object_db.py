@@ -120,7 +120,7 @@ class DynObjectDB:
         self.FILTER_DYNAMIC = True  #TODO: implement as rosparam
         self.DYN_CLASSES = dyn_labels
         self.WORLD_FRAME = "world"
-        self.MOVE_T = 0.5
+        self.MOVE_T = 2   #0.5 works fine on TUM
         self.SIZE_K_MOVE_T = 0    #t = MOVE_T - SIZE_K_MOVE_T * size(pc) - increasing movement tolerance for larger pcds
         self.SPECIAL_TREAT_BG = False
 
@@ -128,7 +128,7 @@ class DynObjectDB:
         print("\n-----OBJECT DB-----")
         print("params used:")
         print("REG_T:", self.REG_T)
-        print("MOVE_T", self.MOVE_T)
+        print("MOVE_T: ", self.MOVE_T)
         for cat in self.segments:
             if cat in self.DYN_CLASSES:
                 print(cat,"-",coco_labels[cat], "detected", len(self.segments[cat]), "DYNAMIC segments")
