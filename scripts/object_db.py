@@ -116,11 +116,11 @@ class DynObjectDB:
         self.stats = {'desc_time_total':0, 'desc_time': [],'reg_time_total': 0, 'movements':[]}
         self.calc_descriptor = descriptor
 
-        self.REG_T = 0.05   #threshold distance for pointcloud signatures - max nonsimilarity toleration
+        self.REG_T = 0.1   #threshold distance for pointcloud signatures - max nonsimilarity toleration
         self.FILTER_DYNAMIC = True  #TODO: implement as rosparam
         self.DYN_CLASSES = dyn_labels
         self.WORLD_FRAME = "world"
-        self.MOVE_T = 2   #0.5 works fine on TUM
+        self.MOVE_T = 0.5   #0.5 works fine on TUM
         self.SIZE_K_MOVE_T = 0    #t = MOVE_T - SIZE_K_MOVE_T * size(pc) - increasing movement tolerance for larger pcds
         self.SPECIAL_TREAT_BG = False
 
