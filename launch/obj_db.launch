@@ -1,0 +1,8 @@
+<launch>
+    <node name="obj_db" pkg="obj_db" type="scripts/object_db.py" output="screen">
+      <param name="registration_threshold" value="0.03" />
+      <param name="movement_threshold" value="0.5" />
+      <param name="m2dp_voxel_size" value="0.01" />
+   </node>
+</launch>
+     

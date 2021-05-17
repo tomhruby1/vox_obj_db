@@ -400,9 +400,9 @@ if __name__ == '__main__':
         "m2dp_vox_size": 0.01,
     } 
     #load ros params
-    rparam = rospy.get_param('gains')
-    print("loaded params:")
-    print(rparam)
+    #rparam = rospy.get_param('gains')
+    #print("loaded params:")
+    #print(rparam)
     #pass dynamic objects list(COCO ids), params, (descriptor function)
     db = DynObjectDB([1], params)
     
