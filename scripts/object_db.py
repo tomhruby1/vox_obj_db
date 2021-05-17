@@ -79,7 +79,7 @@ def M2DP_downsample_desc(seg):
         pointcloud signature downsampled to 
         VOXEL_SIZEd voxels
     """
-    VOXEL_SIZE = 0.02
+    VOXEL_SIZE = 0.01
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(seg)
     downpcd = pcd.voxel_down_sample(voxel_size=VOXEL_SIZE)
@@ -99,7 +99,7 @@ def dist(x,y):
 stats = {'desc_time_total':0, 'desc_time': [],'reg_time_total': 0, 'movements':[]}
 
 class DynObjectDB:
-    def __init__(self, dyn_labels, descriptor):
+    def __init__(self, dyn_labels, params, descriptor=None):
         self.markerArray = MarkerArray()
         self.markerPublisher = rospy.Publisher('/dyn_objects', MarkerArray, queue_size=1)
         self.posePublisher = rospy.Publisher('/dyn_obj_poses', PoseArray, queue_size=1)
@@ -114,38 +114,58 @@ class DynObjectDB:
         #viz segment_registration.cpp
         #self.register_segment = rospy.ServiceProxy('register_segment', obj_db_msgs.srv.RegisterSegment)
         self.stats = {'desc_time_total':0, 'desc_time': [],'reg_time_total': 0, 'movements':[]}
-        self.calc_descriptor = descriptor
 
-        self.REG_T = 0.01   #threshold distance for pointcloud signatures - max nonsimilarity toleration
+        self.REG_T = params['regT']  #threshold distance for pointcloud signatures - max nonsimilarity toleration
+        self.MOVE_T = params['moveT']   #0.5 works fine on TUM
+        self.M2DP_VOX_SIZE = params['m2dp_vox_size']
         self.FILTER_DYNAMIC = True  #TODO: implement as rosparam
         self.DYN_CLASSES = dyn_labels
         self.WORLD_FRAME = "world"
-        self.MOVE_T = 0.5   #0.5 works fine on TUM
         self.SIZE_K_MOVE_T = 0    #t = MOVE_T - SIZE_K_MOVE_T * size(pc) - increasing movement tolerance for larger pcds
-        self.M2DP_VOX_SIZE = 0.02
-        self.SPECIAL_TREAT_BG = False
+        #self.SPECIAL_TREAT_BG = False
+
+        if descriptor != None:
+            self.calc_descriptor = descriptor
+        else:
+            self.calc_descriptor = self.M2DP_downsample_desc
 
     def print_stats(self):
         print("\n-----OBJECT DB-----")
-        print("params used:")
-        print("REG_T:", self.REG_T)
-        print("MOVE_T: ", self.MOVE_T)
+        print("Params used:")
+        print("REG_T =", self.REG_T)
+        print("MOVE_T =", self.MOVE_T)
+        if self.calc_descriptor == self.M2DP_downsample_desc:
+            print("used M2DP descriptor with downsample VOX_SIZE =", self.M2DP_VOX_SIZE)
+        else:
+            print("used custom descriptor")
         for cat in self.segments:
             if cat in self.DYN_CLASSES:
-                print(cat,"-",coco_labels[cat], "detected", len(self.segments[cat]), "DYNAMIC segments")
+                print(cat,"-",coco_labels[cat], "- detected", len(self.segments[cat]), "DYNAMIC segments")
             else:
                 print(cat,"-", coco_labels[cat], "detected", len(self.segments[cat]), "segments")
-        print("total registering time:", stats['reg_time_total'])
+        print("total registration time:", stats['reg_time_total'])
         print("total descriptors calculation time:", stats['desc_time_total'])
         print("desc. calculation time avg:", np.average(stats['desc_time']), 
               "max:", np.max(stats['desc_time']), "min:", np.min(stats['desc_time']))
         print("total movements:", len(stats['movements']))
         print("movement avg:", np.average(stats['movements']), 
               "max:", np.max(stats['movements']), "min:", np.min(stats['movements']))
-        # plt.plot(self.stats['movements'])
-        # plt.show()
+        plt.plot(self.stats['movements'])
+        plt.show()
         print("----------------------")
 
+    def M2DP_downsample_desc(self, seg):
+        """
+            pointcloud signature downsampled to 
+            VOXEL_SIZEd voxels
+        """
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(seg)
+        downpcd = pcd.voxel_down_sample(voxel_size=self.M2DP_VOX_SIZE)
+        
+        des, A1 = M2DP(downpcd.points)
+        return des
+    
     def get_obj_marker(self, object):
         pub = rospy.Publisher('pose', MarkerArray, queue_size=1)
         marker = Marker()
@@ -162,7 +182,7 @@ class DynObjectDB:
         marker.pose = object['pos'].pose
 
         return marker             
-
+    
     #TODO: possibly faster searching by using signature as key in hashtable
     #algthough calc_descriptor is the bottleneck
     # poss. solutions: 
@@ -173,7 +193,6 @@ class DynObjectDB:
         # - keyframes -> might work!
         # - max time per descriptor
     #segment doesnt have one semantic label, but uses the most probable one? -- can change?
-
     def has_moved(self, obj, pc):
         '''
             detects pointcloud movement
@@ -300,7 +319,7 @@ class DynObjectDB:
                         print("MOVEMNT DETECTED", obj['id'], coco_labels[semantic_label])
             #dynamic -> dont publish, create marker
             else: 
-                #TODO: update markers only if position changed -> less dumb
+                #TODO: update markers only if position changed 
                 marker = self.get_obj_marker(obj)
                 self.segments[obj['semantic_label']][obj['id']]['marker'] = marker
                 #self.publish_object_poses()
@@ -345,7 +364,6 @@ class DynObjectDB:
         except(tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
             raise 
         
-        #TODO: markers move with camera -> fix tf frame in time
         trans_pose = tf2_geometry_msgs.do_transform_pose(input_pose, trans)
         # print('transformed pose', 
         # [trans_pose.pose.position.x, trans_pose.pose.position.y, trans_pose.pose.position.z],
@@ -373,55 +391,21 @@ def build_pose_msg(frame, position, orientation = [0,0,0,1]):
     return pose_stamped
 
 
-
-# def tranform_pose(input_pose, from_frame, to_frame):
-#     #each listener has a buffer where it stores all the coordinate transforms coming from 
-#     #the different tf broadcasters
-    
-#     tf_buffer = tf2_ros.Buffer() 
-#     listener = tf2_ros.TransformListener(tf_buffer)
-    
-#     # pose_stamped = tf2_geometry_msgs.PoseStamped()
-#     # pose_stamped.pose = input_pose
-#     # pose_stamped.header.frame_id = from_frame
-#     # pose_stamped.header.stamp = rospy.Time.now()
-
-#     # try: 
-#     #     # ** It is important to wait for the listener to start listening. Hence the rospy.Duration(1)
-#     #     output_pose_stamped = tf_buffer.transform(pose_stamped, to_frame, rospy.Duration(1))
-#     #     return output_pose_stamped
-    
-#     # except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
-#     #     raise
-  
-#     rospy.sleep(0.1)
-#     #print("can tf?:", tf2_ros.can_transform(from_frame, to_frame, rospy.Time.now()))
-#     try:
-#         trans = tf_buffer.lookup_transform(from_frame, to_frame, rospy.Time())
-#     except(tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
-#         raise 
-    
-#     trans_pose = tf2_geometry_msgs.do_transform_pose(poseStampedToTransform, transform)
-#     print('transformed pose', trans_pose.pose)    
-#     #tf1    
-#     # listener = tf.TransformListener()
-
-#     # try:
-#     #     # ** It is important to wait for the listener to start listening. Hence the rospy.Duration(1)
-#     #     (pos,rot) = listener.lookupTransform(from_frame, to_frame, rospy.Time(0))
-#     #     print("posrot", pos, rot)
-#     #     return build_pose_msg(pos, rot)
-#     # except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
-#     #     raise
-
 if __name__ == '__main__':
     rospy.init_node('object_db', disable_signals=True)  #disable signals?
     
-    #pass dynamic objects list(COCO ids), descriptor function
-    db = DynObjectDB([1], M2DP_downsample_desc)
+    params = {
+        "regT":0.03,
+        "moveT":0.5,
+        "m2dp_vox_size": 0.01,
+    } 
+    #load ros params
+    rparam = rospy.get_param('gains')
+    print("loaded params:")
+    print(rparam)
+    #pass dynamic objects list(COCO ids), params, (descriptor function)
+    db = DynObjectDB([1], params)
     
     rospy.Subscriber('/depth_segmentation_node/object_segment', PointCloud2, db.segment_callback)
     rospy.on_shutdown(db.print_stats)
-    #TODO: service for voxblox to get dynamic labels ids
-    #s = rospy.Service('get_dynamic_labels', )
     rospy.spin()
