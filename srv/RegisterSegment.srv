@@ -1,0 +1,5 @@
+sensor_msgs/PointCloud2 map_cloud  #incoming segment point cloud
+---
+uint16 id
+#vpp_msgs/BoundingBox bbox --bb or pose?
+
