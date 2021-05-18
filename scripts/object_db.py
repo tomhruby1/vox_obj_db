@@ -23,7 +23,7 @@ import numpy as np
 
 from std_msgs.msg import String
 from sensor_msgs import point_cloud2
-from sensor_msgs.msg import PointCloud2, PointField
+from sensor_msgs.msg import PointCloud2, PointField, CameraInfo
 from std_msgs.msg import Header
 
 import matplotlib.pyplot as plt
@@ -118,41 +118,46 @@ class DynObjectDB:
         self.REG_T = params['regT']  #threshold distance for pointcloud signatures - max nonsimilarity toleration
         self.MOVE_T = params['moveT']   #0.5 works fine on TUM
         self.M2DP_VOX_SIZE = params['m2dp_vox_size']
-        self.FILTER_DYNAMIC = True  #TODO: implement as rosparam
+        self.FILTER_DYNAMIC = params['filter_dynamic'] 
         self.DYN_CLASSES = dyn_labels
         self.WORLD_FRAME = "world"
         self.SIZE_K_MOVE_T = 0    #t = MOVE_T - SIZE_K_MOVE_T * size(pc) - increasing movement tolerance for larger pcds
-        #self.SPECIAL_TREAT_BG = False
+        self.SPECIAL_TREAT_BG = False
+
+        self.NEW_CAM_FRAME = "base_link"
 
         if descriptor != None:
             self.calc_descriptor = descriptor
         else:
             self.calc_descriptor = self.M2DP_downsample_desc
+        if self.FILTER_DYNAMIC == False:
+            print("Ignoring dynamic objects")
 
     def print_stats(self):
-        print("\n-----OBJECT DB-----")
-        print("Params used:")
-        print("REG_T =", self.REG_T)
-        print("MOVE_T =", self.MOVE_T)
-        if self.calc_descriptor == self.M2DP_downsample_desc:
-            print("used M2DP descriptor with downsample VOX_SIZE =", self.M2DP_VOX_SIZE)
-        else:
-            print("used custom descriptor")
-        for cat in self.segments:
-            if cat in self.DYN_CLASSES:
-                print(cat,"-",coco_labels[cat], "- detected", len(self.segments[cat]), "DYNAMIC segments")
+        if self.FILTER_DYNAMIC and len(self.segments) > 0:
+            print("\n-----OBJECT DB-----")
+            print("Params used:")
+            print("REG_T =", self.REG_T)
+            print("MOVE_T =", self.MOVE_T)
+            if self.calc_descriptor == self.M2DP_downsample_desc:
+                print("used M2DP descriptor with downsample VOX_SIZE =", self.M2DP_VOX_SIZE)
             else:
-                print(cat,"-", coco_labels[cat], "detected", len(self.segments[cat]), "segments")
-        print("total registration time:", stats['reg_time_total'])
-        print("total descriptors calculation time:", stats['desc_time_total'])
-        print("desc. calculation time avg:", np.average(stats['desc_time']), 
-              "max:", np.max(stats['desc_time']), "min:", np.min(stats['desc_time']))
-        print("total movements:", len(stats['movements']))
-        print("movement avg:", np.average(stats['movements']), 
-              "max:", np.max(stats['movements']), "min:", np.min(stats['movements']))
-        plt.plot(self.stats['movements'])
-        plt.show()
-        print("----------------------")
+                print("used custom descriptor")
+            for cat in self.segments:
+                if cat in self.DYN_CLASSES:
+                    print(cat,"-",coco_labels[cat], "- detected", len(self.segments[cat]), "DYNAMIC segments")
+                else:
+                    print(cat,"-", coco_labels[cat], "detected", len(self.segments[cat]), "segments")
+            print("total registration time:", stats['reg_time_total'])
+            print("total descriptors calculation time:", stats['desc_time_total'])
+            print("desc. calculation time avg:", np.average(stats['desc_time']), 
+                "max:", np.max(stats['desc_time']), "min:", np.min(stats['desc_time']))
+            print("total movements:", len(stats['movements']))
+            print("movement avg:", np.average(stats['movements']), 
+                "max:", np.max(stats['movements']), "min:", np.min(stats['movements']))
+            print("----------------------")
+        else:
+            print("...")
 
     def M2DP_downsample_desc(self, seg):
         """
@@ -274,56 +279,59 @@ class DynObjectDB:
                 #     print(c, "-", coco_labels[c], len(self.segments[c]))
 
     def segment_callback(self, data):
-            assert isinstance(data, PointCloud2)    #?
-            seg = point_cloud2.read_points(data)    #generator object
-            point = next(seg)   #get labels from the first point
-            semantic_label = point[-1]
-            instance_label = point[-2]
-            
-            #calc descriptor            
-            mu, pc = get_point_cloud(seg)  
-            t1 = time.time()
-            sign = self.calc_descriptor(np.asarray(pc))
-            t2 = time.time()
-            t_desc = t2 - t1
-            
-            #create object
-            seg_frame = data.header.frame_id.replace('/','')
-            pose = build_pose_msg(seg_frame, mu)    #build pose from segment frame and clouds centroid
-            pos = self.tranform_pose(pose, seg_frame, self.WORLD_FRAME, time_stamp = data.header.stamp)
-            obj = {"id": 0, "signature": sign,"instance_label":instance_label, "semantic_label":semantic_label, 
-                   "observ_count": 0, 'pos':pos, 'pos_prev': 0, 'frame': seg_frame}
-            
-            #registration
-            t1 = time.time()
-            self.register_segment(obj)
-            t2 = time.time()
-            t_reg = t2 - t1
-            print("testing obj", obj['semantic_label'], obj['id'], 
-            "descriptor time:", t_desc, "registation time", t_reg)
-            stats['desc_time_total'] += t_desc
-            stats['desc_time'].append(t_desc)
-            stats['reg_time_total'] += t_reg
-            
-            #movement detection
-            #not dynamic class but could be moving
-            if(obj['semantic_label'] not in self.DYN_CLASSES):
-                #if was seen
-                if(self.segments[obj['semantic_label']][obj['id']]['observ_count'] > 0):
-                    if((not self.has_moved(self.segments[semantic_label][obj['id']], pc)) 
-                        or (not self.FILTER_DYNAMIC)):
-                        #publish segment msg for mapping
-                        print("PUBLISHING object- class", obj['semantic_label'], "id", obj['id'])
-                        self.segment_publisher.publish(data)
-                    else:
-                        print("MOVEMNT DETECTED", obj['id'], coco_labels[semantic_label])
-            #dynamic -> dont publish, create marker
-            else: 
-                #TODO: update markers only if position changed 
-                marker = self.get_obj_marker(obj)
-                self.segments[obj['semantic_label']][obj['id']]['marker'] = marker
-                #self.publish_object_poses()
-                self.publish_object_markers()
+            if not self.FILTER_DYNAMIC: 
+                #just pass segments
+                self.segment_publisher.publish(data)
+            else:
+                assert isinstance(data, PointCloud2)   
+                seg = point_cloud2.read_points(data)    #generator object
+                point = next(seg)   #get labels from the first point
+                semantic_label = point[-1]
+                instance_label = point[-2]
+                
+                #calc descriptor            
+                mu, pc = get_point_cloud(seg)  
+                t1 = time.time()
+                sign = self.calc_descriptor(np.asarray(pc))
+                t2 = time.time()
+                t_desc = t2 - t1
+                
+                #create object
+                seg_frame = data.header.frame_id.replace('/','')
+                pose = build_pose_msg(seg_frame, mu)    #build pose from segment frame and clouds centroid
+                pos = self.tranform_pose(pose, seg_frame, self.WORLD_FRAME, time_stamp = data.header.stamp)
+                obj = {"id": 0, "signature": sign,"instance_label":instance_label, "semantic_label":semantic_label, 
+                    "observ_count": 0, 'pos':pos, 'pos_prev': 0, 'frame': seg_frame}
+                
+                #registration
+                t1 = time.time()
+                self.register_segment(obj)
+                t2 = time.time()
+                t_reg = t2 - t1
+                print("testing obj", obj['semantic_label'], obj['id'], 
+                "descriptor time:", t_desc, "registation time", t_reg)
+                stats['desc_time_total'] += t_desc
+                stats['desc_time'].append(t_desc)
+                stats['reg_time_total'] += t_reg
+                
+                #movement detection
+                #not dynamic class but could be moving
+                if(obj['semantic_label'] not in self.DYN_CLASSES):
+                    #if was seen
+                    if(self.segments[obj['semantic_label']][obj['id']]['observ_count'] > 0):
+                        if not self.has_moved(self.segments[semantic_label][obj['id']], pc):
+                            #publish segment msg for mapping
+                            print("PUBLISHING object- class", obj['semantic_label'], "id", obj['id'])
+                            self.segment_publisher.publish(data)
+                        else:
+                            print("MOVEMNT DETECTED", obj['id'], coco_labels[semantic_label])
+                #dynamic -> dont publish, create marker
+                else: 
+                    #TODO: update markers only if position changed 
+                    marker = self.get_obj_marker(obj)
+                    self.segments[obj['semantic_label']][obj['id']]['marker'] = marker
+                    #self.publish_object_poses()
+                    self.publish_object_markers()
 
     def publish_object_markers(self):
         # build marker array and publish
@@ -395,6 +403,7 @@ if __name__ == '__main__':
     rospy.init_node('object_db', disable_signals=True)  #disable signals?
     
     params = {
+        "filter_dynamic": False,
         "regT":0.03,
         "moveT":0.5,
         "m2dp_vox_size": 0.01,
