@@ -30,6 +30,7 @@ import matplotlib.pyplot as plt
 
 from m2dp import M2DP
 import open3d as o3d
+import copy
 
 coco_labels = ['BG', 'person', 'bicycle', 'car', 'motorcycle', 'airplane',
                'bus', 'train', 'truck', 'boat', 'traffic light',
@@ -124,7 +125,7 @@ class DynObjectDB:
         self.SIZE_K_MOVE_T = 0    #t = MOVE_T - SIZE_K_MOVE_T * size(pc) - increasing movement tolerance for larger pcds
         self.SPECIAL_TREAT_BG = False
 
-        self.NEW_CAM_FRAME = "base_link"
+        self.NEW_CAM_FRAME = None#"openni_camera"
 
         if descriptor != None:
             self.calc_descriptor = descriptor
@@ -289,6 +290,10 @@ class DynObjectDB:
                 semantic_label = point[-1]
                 instance_label = point[-2]
                 
+                static_segment = data
+                if self.NEW_CAM_FRAME != None:
+                    static_segment.header.frame_id = self.NEW_CAM_FRAME
+
                 #calc descriptor            
                 mu, pc = get_point_cloud(seg)  
                 t1 = time.time()
@@ -322,7 +327,7 @@ class DynObjectDB:
                         if not self.has_moved(self.segments[semantic_label][obj['id']], pc):
                             #publish segment msg for mapping
                             print("PUBLISHING object- class", obj['semantic_label'], "id", obj['id'])
-                            self.segment_publisher.publish(data)
+                            self.segment_publisher.publish(static_segment)
                         else:
                             print("MOVEMNT DETECTED", obj['id'], coco_labels[semantic_label])
                 #dynamic -> dont publish, create marker
@@ -361,22 +366,12 @@ class DynObjectDB:
 
         try:
             trans = self.tf_buffer.lookup_transform(from_frame, to_frame, time_stamp)
-            # trans = self.tf_buffer.lookup_transform_full(
-            #     target_frame = to_frame,
-            #     target_time = rospy.Time.now(),
-            #     source_frame = from_frame,
-            #     source_time = time_stamp,
-            #     fixed_frame = to_frame,
-            #     timeout = rospy.Duration(1.0)
-            # )
+
         except(tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
             raise 
         
         trans_pose = tf2_geometry_msgs.do_transform_pose(input_pose, trans)
-        # print('transformed pose', 
-        # [trans_pose.pose.position.x, trans_pose.pose.position.y, trans_pose.pose.position.z],
-        # [trans_pose.pose.orientation.x, trans_pose.pose.orientation.y, trans_pose.pose.orientation.z, trans_pose.pose.orientation.w]
-        # )
+
         return trans_pose 
 
 #TODO: zkontrolovat xyz zda neni prohazeno
@@ -403,10 +398,10 @@ if __name__ == '__main__':
     rospy.init_node('object_db', disable_signals=True)  #disable signals?
     
     params = {
-        "filter_dynamic": False,
-        "regT":0.03,
-        "moveT":0.5,
-        "m2dp_vox_size": 0.01,
+        "filter_dynamic": True,
+        "regT":0.02,
+        "moveT":1000,
+        "m2dp_vox_size": 0.02,
     } 
     #load ros params
     #rparam = rospy.get_param('gains')
