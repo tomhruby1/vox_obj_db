@@ -96,6 +96,13 @@ def dist(x,y):
     y = np.asarray(y)
     return np.linalg.norm((x-y)*(x-y)) 
 
+def avg_desc(new, old, occurences):
+    '''
+        return avg of two signature vectors
+        weighted according to how many times observed
+    '''
+    avg_des = (occurences*np.asarray(new) + np.asarray(old))/(occurences+1)
+    return avg_des
 
 stats = {'desc_time_total':0, 'desc_time': [],'reg_time_total': 0, 'movements':[]}
 
@@ -120,6 +127,7 @@ class DynObjectDB:
         self.MOVE_T = params['moveT']   #0.5 works fine on TUM
         self.M2DP_VOX_SIZE = params['m2dp_vox_size']
         self.FILTER_DYNAMIC = params['filter_dynamic'] 
+        self.AVG_SIGN = params['average_signatures']
         self.DYN_CLASSES = dyn_labels
         self.WORLD_FRAME = "world"
         self.SIZE_K_MOVE_T = 0    #t = MOVE_T - SIZE_K_MOVE_T * size(pc) - increasing movement tolerance for larger pcds
@@ -268,6 +276,11 @@ class DynObjectDB:
                 self.segments[cat][argmin]['observ_count'] += 1 #save poses for movement detect
                 self.segments[cat][argmin]['pos_prev'] = self.segments[cat][argmin]['pos']
                 self.segments[cat][argmin]['pos'] = obj['pos']
+                #edit prototype signature
+                if self.AVG_SIGN:
+                    self.segments[cat][argmin]['signature'] = avg_desc(obj['signature'], 
+                                                                        self.segments[cat][argmin]['signature'], 
+                                                                        self.segments[cat][argmin]['observ_count'])
                 obj['id'] = argmin
             else:
                 #label previously not seen, add new to segment db
@@ -399,9 +412,10 @@ if __name__ == '__main__':
     
     params = {
         "filter_dynamic": True,
-        "regT":0.02,
-        "moveT":1000,
+        "regT":0.03,
+        "moveT":0.35,
         "m2dp_vox_size": 0.02,
+        "average_signatures": True
     } 
     #load ros params
     #rparam = rospy.get_param('gains')
